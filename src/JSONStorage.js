@@ -9,12 +9,16 @@ const JSONEntity = require('./JSONEntity');
  */
 module.exports = class JSONStorage {
 
+  constructor() {
+    this._config = null;
+    this._schemas = null;
+  }
+
   /**
    * @param {import('../types').T_JSONStorageConfig} config
    */
-  constructor(config = {}) {
+  setConfig(config = {}) {
     this._config = config;
-    this._schemas = null;
 
     if (config.schema && FS.existsSync(config.schema) && FS.statSync(config.schema).isDirectory()) {
       for (const file of FS.readdirSync(config.schema)) {
