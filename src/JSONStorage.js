@@ -39,10 +39,47 @@ module.exports = class JSONStorage {
 
   /**
    * @param {string} type 
+   * @param {Object} entity 
+   * @returns {Object}
+   */
+  cut(type, entity) {
+    const refs = this.getSchemaRefs(type);
+    const fields = this.getSchemaFields(type);
+
+    for (const field in entity) {
+      if (typeof fields[field] !== 'string' && typeof refs[field] !== 'string') {
+        delete entity[field];
+      }
+      if (typeof refs[field] === 'string' && entity[field] && typeof entity[field] !== 'number') {
+        entity[field] = this.cut(refs[field], entity[field]);
+      }
+    }
+    return entity;
+  }
+
+  /**
+   * @param {string} type 
    * @returns {JSONEntity}
    */
   get(type) {
     return new JSONEntity(this, type);
+  }
+
+  /**
+   * @param {string} type 
+   * @param {(import('../types').C_StorageFilter|null)} predicate 
+   * @returns {JSONEntity[]}
+   */
+  search(type, predicate = null) {
+    const file = this.getDataFile(type);
+    let value = {id: 0, data: []};
+    if (FS.existsSync(file)) {
+      value = require(file);
+    }
+    if (predicate === null) return value.data.map(data => new JSONEntity(this, type, data));
+    return value.data.filter((data, index, list) => {
+      return predicate(new JSONEntity(this, type, data), index, list);
+    }).map(data => new JSONEntity(this, type, data));
   }
 
   /**
@@ -136,6 +173,7 @@ module.exports = class JSONStorage {
   delete(type, id, recursive = false) {
     if (recursive) {
       const entity = this.load(type, id);
+      if (!entity) return this;
       const refs = this.getSchemaRefs(type);
       for (const ref in refs) {
         if (typeof entity[ref] === 'number') {

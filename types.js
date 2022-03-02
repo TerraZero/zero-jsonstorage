@@ -5,4 +5,11 @@
  * @property {boolean} debug
  */
 
+/**
+ * @callback C_StorageFilter
+ * @param {import('./src/JSONEntity')} entity
+ * @param {number} index
+ * @param {Object[]} list
+ */
+
 module.exports = {};

@@ -1,3 +1,4 @@
+const Reflection = require('pencl-kit/src/Util/Reflection');
 const Validator = require('jsonschema').Validator;
 
 module.exports = class JSONEntity {
@@ -74,6 +75,23 @@ module.exports = class JSONEntity {
   delete(recursive = false) {
     this.storage.delete(this.type, this.id, recursive);
     return this;
+  }
+
+  /**
+   * @param {string} field 
+   * @returns {(JSONEntity|null|string|number)}
+   */
+  deep(field) {
+    const splits = field.split('.');
+    let value = this.get(splits.shift());
+    for (const key of splits) {
+      if (value instanceof JSONEntity) {
+        value = value.get(key);
+      } else {
+        return null;
+      }
+    }
+    return value;
   }
 
   /**
