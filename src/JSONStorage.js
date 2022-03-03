@@ -202,7 +202,7 @@ module.exports = class JSONStorage {
   /**
    * @param {string} type 
    * @param {number} id 
-   * @returns {Object}
+   * @returns {(Object|null)}
    */
   load(type, id) {
     const file = this.getDataFile(type);
@@ -210,7 +210,7 @@ module.exports = class JSONStorage {
     if (FS.existsSync(file)) {
       value = require(file);
     }
-    return value.data.find(v => v.id === id);
+    return value.data.find(v => v.id === id) || null;
   }
 
   /**
