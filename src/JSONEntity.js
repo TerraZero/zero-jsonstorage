@@ -1,6 +1,3 @@
-const Reflection = require('pencl-kit/src/Util/Reflection');
-const Validator = require('jsonschema').Validator;
-
 module.exports = class JSONEntity {
 
   /**
@@ -8,15 +5,10 @@ module.exports = class JSONEntity {
    * @param {string} type
    * @param {Object} data
    */
-  constructor(storage, type, data = null) {
+  constructor(storage, type, data) {
     this.storage = storage;
     this.type = type;
     this.data = data;
-
-    this._refs = null;
-    this._fields = null;
-    this._entities = {};
-    this._validator = new Validator();
   }
 
   /** @returns {(number|null)} */
@@ -24,47 +16,11 @@ module.exports = class JSONEntity {
     return this.data && this.data.id || null;
   }
 
-  /** @returns {Object<string, string>} */
-  get refs() {
-    if (this._refs === null) {
-      this._refs = this.storage.getSchemaRefs(this.type);
-    }
-    return this._refs;
-  }
-
-  /** @returns {Object<string, string>} */
-  get fields() {
-    if (this._fields === null) {
-      this._fields = this.storage.getSchemaFields(this.type);
-    }
-    return this._fields;
-  }
-
-  /**
-   * @param {number} id 
-   * @returns {this}
-   */
-  load(id) {
-    this.data = this.storage.load(this.type, id);
-    return this;
-  }
-
   /**
    * @returns {this}
    */
   save() {
     this.storage.save(this.type, this.data);
-    return this;
-  }
-
-  /**
-   * @param {Object} data 
-   * @returns {this}
-   */
-  create(data) {
-    this.storage.validate(this.type, data);
-    this.data = data;
-    this._entities = {};
     return this;
   }
 
@@ -79,36 +35,54 @@ module.exports = class JSONEntity {
 
   /**
    * @param {string} field 
-   * @returns {(JSONEntity|null|string|number)}
+   * @param {number} index
+   * @param {string} target
+   * @returns {(JSONEntity|JSONEntity[]|null|string|number)}
    */
-  deep(field) {
-    const splits = field.split('.');
-    let value = this.get(splits.shift());
-    for (const key of splits) {
-      if (value instanceof JSONEntity) {
-        value = value.get(key);
-      } else {
-        return null;
-      }
-    }
-    return value;
-  }
+  get(field, index = null, target = null) {
+    const ref = this.storage.getSchemaRefs(this.type).find(v => v.field === field);
 
-  /**
-   * @param {string} field 
-   * @returns {(JSONEntity|null|string|number)}
-   */
-  get(field) {
-    if (typeof this.refs[field] === 'string') {
-      if (this._entities[field]) return this._entities[field];
-      if (typeof this.data[field] === 'number') {
-        this.data[field] = this.storage.load(this.refs[field], this.data[field]);
+    if (ref !== undefined) {
+      let value = null;
+      switch (ref.type) {
+        case 'prop':
+          value = this.data[field];
+          break;
+        case 'props':
+          if (index === null) {
+            value = this.data[field];
+          } else {
+            value = this.data[field][index];
+          }
+          break;
+        case 'reference':
+          if (typeof index === 'string' && target === null) {
+            target = index;
+            index = null;
+          }
+          
+          if (index === null) {
+            value = this.data[field].map(v => target && v[target] || v);
+          } else {
+            value = target && this.data[field][index][target] || this.data[field][index];
+          }
+          break;
       }
-      if (this.data[field] === null || this.data[field] === undefined) return null;
-      this._entities[field] = new JSONEntity(this.storage, this.refs[field], this.data[field]);
-      return this._entities[field];
+
+      let reference = ref.ref;
+      if (ref.type === 'reference') {
+        const target_info = ref.targets.find(v => v.target === target);
+        if (target_info === undefined) return value;
+        reference = target_info.ref;
+      }
+
+      if (Array.isArray(value)) {
+        return value.map(v => this.storage.get(this.storage.getRefType(reference), v));
+      } else {
+        return this.storage.get(this.storage.getRefType(reference), value);
+      }
     }
-    return this.data[field] || null;
+    return this.data[field];
   }
 
   /**
@@ -117,21 +91,14 @@ module.exports = class JSONEntity {
    * @returns {this}
    */
   set(field, value) {
-    if (typeof this.fields[field] === 'string') {
-      const result = this._validator.validate(value, this.storage.getSchema(this.type).fields[field]);
-      const errors = [];
+    const result = this.storage.getValidator(this.type, field)(value);
+    const errors = [];
 
-      for (const error of result.errors) {
-        errors.push(error.stack);
-      }
-      
-      if (errors.length) throw new Error(errors.join('; '));
-    } else if (typeof this.refs[field] === 'string') {
-      this.storage.validate(this.refs[field], value);
-    } else {
-      throw new Error('Unknown field "' + field + '" in schema "' + this.type + '"');
+    for (const error of result.errors) {
+      errors.push(error.stack);
     }
-
+    
+    if (errors.length) throw new Error(errors.join('; '));
     this.data[field] = value;
     return this;
   }

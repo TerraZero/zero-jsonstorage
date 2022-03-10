@@ -12,6 +12,9 @@ module.exports = class JSONStorage {
   constructor() {
     this._config = null;
     this._schemas = null;
+    
+    this._refs = {};
+    this._defsSchema = null;
   }
 
   /**
@@ -22,8 +25,11 @@ module.exports = class JSONStorage {
 
     if (config.schema && FS.existsSync(config.schema) && FS.statSync(config.schema).isDirectory()) {
       for (const file of FS.readdirSync(config.schema)) {
+        if (!file.endsWith('.schema.json')) continue;
+        const name = file.substring(0, file.length - '.schema.json'.length).toLowerCase();
         const dataschema = require(Path.join(config.schema, file));
-        this.addSchema(dataschema.type, dataschema.schema);
+
+        this.addSchema(name, dataschema);
       }
     }
   }
@@ -43,30 +49,69 @@ module.exports = class JSONStorage {
 
   /**
    * @param {string} type 
-   * @param {Object} entity 
-   * @returns {Object}
+   * @returns {Object[]}
    */
-  cut(type, entity) {
-    const refs = this.getSchemaRefs(type);
-    const fields = this.getSchemaFields(type);
+  getSchemaRefs(type) {
+    if (this._refs[type] === undefined) {
+      this._refs[type] = [];
+      const schema = this.getSchema(type);
 
-    for (const field in entity) {
-      if (typeof fields[field] !== 'string' && typeof refs[field] !== 'string') {
-        delete entity[field];
-      }
-      if (typeof refs[field] === 'string' && entity[field] && typeof entity[field] !== 'number') {
-        entity[field] = this.cut(refs[field], entity[field]);
+      for (const field in schema.properties) {
+        if (schema.properties[field].$ref) {
+          this._refs[type].push({
+            type: 'prop',
+            field: field,
+            ref: schema.properties[field].$ref,
+          });
+        } else if (schema.properties[field].type === 'array') {
+          if (schema.properties[field].items.$ref) {
+            this._refs[type].push({
+              type: 'props',
+              field: field,
+              ref: schema.properties[field].items.$ref,
+            });
+          } else if (schema.properties[field].items.type === 'object') {
+            for (const value_field in schema.properties[field].items.properties) {
+              if (schema.properties[field].items.properties[value_field].$ref) {
+                let reference = this._refs[type].find(v => v.field === field);
+                if (reference === undefined) {
+                  this._refs[type].push({
+                    type: 'reference',
+                    field: field,
+                    targets: [
+                      {
+                        target: value_field,
+                        ref: schema.properties[field].items.properties[value_field].$ref,
+                      },
+                    ],
+                  });
+                } else {
+                  reference.targets.push({
+                    target: value_field,
+                    ref: schema.properties[field].items.properties[value_field].$ref,
+                  });
+                }
+              }
+            }
+          }
+        }
       }
     }
-    return entity;
+    return this._refs[type];
   }
 
   /**
    * @param {string} type 
+   * @param {(number|Object)} idData
    * @returns {JSONEntity}
    */
-  get(type) {
-    return new JSONEntity(this, type);
+  get(type, idData) {
+    if (typeof idData === 'number') {
+      return new JSONEntity(this, type, this.load(type, idData));
+    } else {
+      this.validate(type, idData, true);
+      return new JSONEntity(this, type, idData);
+    }
   }
 
   /**
@@ -94,28 +139,32 @@ module.exports = class JSONStorage {
     return Path.join(this.config.path, type + '.json');
   }
 
+  getDefsSchema() {
+    if (this._defsSchema === null) {
+      this._defsSchema = {};
+      for (const name in this.schemas) {
+        this._defsSchema[name] = JSON.parse(JSON.stringify(this.schemas[name]));
+        this._defsSchema[name].type = ['object', 'number'];
+      }
+    }
+    return this._defsSchema;
+  }
+
   /**
    * @param {string} type 
+   * @param {string} field
    * @returns {Function}
    */
-  getValidator(type) {
+  getValidator(type, field = null) {
     const validator = new Validator();
+    let schema = this.getSchema(type);
 
-    for (const name in this.schemas) {
-      validator.addSchema({
-        id: '/' + name,
-        type: ['object', 'number'],
-        properties: this.schemas[name].fields,
-        additionalProperties: false,
-      }, '/' + name);
+    if (field !== null) {
+      schema = schema.properties[field];
     }
-    return (entity) => {
-      return validator.validate(entity, {
-        id: '/' + type,
-        type: ['object', 'number'],
-        properties: this.getSchema(type).fields,
-        additionalProperties: false,
-      });
+    schema.$defs = this.getDefsSchema();
+    return (data) => {
+      return validator.validate(data, schema);
     };
   }
 
@@ -125,7 +174,8 @@ module.exports = class JSONStorage {
    * @returns {this}
    */
   addSchema(type, schema) {
-    schema.fields.id = { type: 'number' };
+    schema.type = ['object', 'number'];
+    schema.properties.id = { type: 'number' };
     this.schemas[type] = schema;
     return this;
   }
@@ -140,52 +190,19 @@ module.exports = class JSONStorage {
 
   /**
    * @param {string} type 
-   * @returns {Object<string, string>}
-   */
-  getSchemaFields(type) {
-    const schema = this.getSchema(type);
-    const fields = {};
-    for (const field in schema.fields) {
-      if (typeof schema.fields[field].type === 'string') {
-        fields[field] = schema.fields[field].type;
-      }
-    }
-    return fields;
-  }
-
-  /**
-   * @param {string} type 
-   * @returns {Object<string, string>}
-   */
-  getSchemaRefs(type) {
-    const schema = this.getSchema(type);
-    const refs = {};
-    for (const field in schema.fields) {
-      if (typeof schema.fields[field].$ref === 'string') {
-        refs[field] = schema.fields[field].$ref.substring(1);
-      }
-    }
-    return refs;
-  }
-
-  /**
-   * @param {string} type 
    * @param {number} id 
    * @param {boolean} recursive 
    * @returns {this}
    */
   delete(type, id, recursive = false) {
     if (recursive) {
-      const entity = this.load(type, id);
-      if (!entity) return this;
-      const refs = this.getSchemaRefs(type);
-      for (const ref in refs) {
-        if (typeof entity[ref] === 'number') {
-          this.delete(refs[ref], entity[ref], true);
-        } else if (entity[ref] !== null && entity[ref] !== undefined && typeof entity[ref] === 'object') {
-          this.delete(refs[ref], entity[ref].id, true);
+      this.mapRefs(type, this.load(type, id), (value, index, ref) => {
+        if (typeof value === 'number') {
+          this.delete(this.getRefType(ref.ref), value, true);
+        } else {
+          this.delete(this.getRefType(ref.ref), value.id, true);
         }
-      }
+      });
     }
     const file = this.getDataFile(type);
     let value = {id: 0, data: []};
@@ -213,29 +230,63 @@ module.exports = class JSONStorage {
     return value.data.find(v => v.id === id) || null;
   }
 
+  mapRefs(type, data, mapper, references = null) {
+    const refs = references || this.getSchemaRefs(type);
+
+    for (const ref of refs) {
+      if (data[ref.field] === null || data[ref.field] === undefined) {
+        delete data[ref.field];
+        continue;
+      }
+      switch (ref.type) {
+        case 'prop':
+          data[ref.field] = mapper(data[ref.field], null, ref);
+          break;
+        case 'props':
+          for (const index in data[ref.field]) {
+            data[ref.field][index] = mapper(data[ref.field][index], index, ref);
+          }
+          break;
+        case 'reference':
+          for (const index in data[ref.field]) {
+            for (const target of ref.targets) {
+              data[ref.field][index][target.target] = mapper(data[ref.field][index][target.target], index, {field: ref.field, type: ref.type, ref: target.ref, target: target.target});
+            }
+          }
+          break;
+      }
+    }
+  }
+
   /**
-   * @param {string} type 
-   * @param {Object} entity 
+   * @param {string} ref 
+   * @returns {string}
+   */
+  getRefType(ref) {
+    return ref.split('/').pop();
+  }
+
+  /**
+   * @param {string} type
+   * @param {Object} data 
    * @returns {this}
    */
-  save(type, entity) {
-    this.validate(type, entity);
+  save(type, data = null) {
+    this.validate(type, data);
+
+    this.mapRefs(type, data, (value, index, ref) => {
+      if (typeof value === 'number') return value;
+      this.save(this.getRefType(ref.ref), value);
+      return value.id;
+    });
 
     const file = this.getDataFile(type);
     FileUtil.prepareDir('', file);
 
-    const refs = this.getSchemaRefs(type);
-    for (const ref in refs) {
-      if (typeof entity[ref] !== 'number' && entity[ref] !== undefined && entity[ref] !== null) {
-        this.save(refs[ref], entity[ref]);
-        entity[ref] = entity[ref].id;
-      }
-    }
-
-    if (entity.id) {
-      this.doUpdate(file, entity);
+    if (data.id) {
+      this.doUpdate(file, data);
     } else {
-      this.doCreate(file, entity);
+      this.doCreate(file, data);
     }
 
     return this;
@@ -244,21 +295,21 @@ module.exports = class JSONStorage {
   /**
    * @private
    * @param {string} file 
-   * @param {Object} entity 
+   * @param {Object} data 
    * @returns {this}
    */
-  doUpdate(file, entity) {
+  doUpdate(file, data) {
     let value = {id: 0, data: []};
     if (FS.existsSync(file)) {
       value = require(file);
     }
-    const index = value.data.findIndex(v => v.id === entity.id);
+    const index = value.data.findIndex(v => v.id === data.id);
     if (index === -1) {
-      value.data.push(entity);
+      value.data.push(data);
     } else {
-      value.data[index] = entity;
+      value.data[index] = data;
     }
-    if (value.id < entity.id) value.id = entity.id;
+    if (value.id < data.id) value.id = data.id;
     FS.writeFileSync(file, this.toJSON(value));
     return this;
   }
@@ -266,28 +317,28 @@ module.exports = class JSONStorage {
   /**
    * @private
    * @param {string} file 
-   * @param {Object} entity 
+   * @param {Object} data 
    * @returns {this}
    */
-  doCreate(file, entity) {
+  doCreate(file, data) {
     let value = {id: 0, data: []};
     if (FS.existsSync(file)) {
       value = require(file);
     }
-    entity.id = ++value.id;
-    value.data.push(entity);
+    data.id = ++value.id;
+    value.data.push(data);
     FS.writeFileSync(file, this.toJSON(value));
     return this;
   }
 
   /**
    * @param {string} type 
-   * @param {Object} entity 
+   * @param {Object} data 
    * @param {boolean} throwing 
    * @returns {(import('jsonschema').ValidatorResult|boolean)}
    */
-  validate(type, entity, throwing = true) {
-    const result = this.getValidator(type)(entity);
+  validate(type, data, throwing = true) {
+    const result = this.getValidator(type)(data);
     const errors = [];
 
     for (const error of result.errors) {
