@@ -175,7 +175,7 @@ module.exports = class JSONStorage {
    */
   addSchema(type, schema) {
     schema.type = ['object', 'number'];
-    schema.properties.id = { type: 'number' };
+    if (!schema.properties.id) schema.properties.id = { type: 'number' };
     this.schemas[type] = schema;
     return this;
   }
